@@ -17,18 +17,23 @@ type
     FRequestInfo: TIdHTTPRequestInfo;
     FResponseInfo: TIdHTTPResponseInfo;
     FReg: TRESTCommandREG;
+    FStreamContents: String;
     procedure start(AReg: TRESTCommandREG; AContext: TIdContext; ARequestInfo: TIdHTTPRequestInfo; AResponseInfo: TIdHTTPResponseInfo; AParams: TStringList);
-    procedure ParseParams(AURI, AMask:String);
+    procedure ParseParams(const AURI, AMask:String);
+    procedure ReadStream(ARequestInfo: TIdHTTPRequestInfo);
   protected
-    procedure execute(); virtual;
+    procedure execute; virtual;
   public
     constructor create(AServer: THttpServerCommand);
     procedure ResponseJSON(Json: String);
+    procedure Error(code: integer);
+
     destructor Destroy; override;
     property Context: TIdContext read FContext;
     property RequestInfo: TIdHTTPRequestInfo read FRequestInfo;
     property ResponseInfo: TIdHTTPResponseInfo read FResponseInfo;
     property Params: TStringList read FParams;
+    property StreamContents : String read FStreamContents;
   end;
 
   TRESTCommandREG= class
@@ -43,9 +48,9 @@ type
   private
     FList: TObjectList<TRESTCommandREG>;
   public
-    procedure Register(ATYPE:String; APATH: String; ACommand: TRESTCommandClass);
+    procedure Register(const ATYPE, APATH: String; ACommand: TRESTCommandClass);
     constructor Create(AOwner: TComponent); override;
-    function isUri(AURI: String; AMask: String; AParams: TStringList): boolean;
+    function isUri(const AURI, AMask: String; AParams: TStringList): boolean;
     function FindCommand(ACommand: String; AURI: String; Params: TStringList): TRESTCommandREG;
     destructor Destroy; override;
   end;
@@ -53,7 +58,6 @@ type
   THttpServerCommand= class (TComponent)
   private
     FCommands: THttpServerCommandRegister;
-    procedure SetCommands(const Value: THttpServerCommandRegister);
     function TrataCommand(AContext: TIdContext; ARequestInfo: TIdHTTPRequestInfo; AResponseInfo: TIdHTTPResponseInfo): boolean;
     procedure TrataErro(ACmd: TRESTCommandREG;AContext: TIdContext; ARequestInfo: TIdHTTPRequestInfo; AResponseInfo: TIdHTTPResponseInfo;  E: Exception);
   public
@@ -65,6 +69,9 @@ type
 
 
 implementation
+
+uses
+  RegularExpressions;
 
 { THttpServerCommand }
 function THttpServerCommand.TrataCommand(AContext: TIdContext;
@@ -104,18 +111,15 @@ procedure THttpServerCommand.TrataErro(ACmd: TRESTCommandREG;
   AContext: TIdContext; ARequestInfo: TIdHTTPRequestInfo;
   AResponseInfo: TIdHTTPResponseInfo; E: Exception);
 begin
-  // TODO ...
-  AResponseInfo.ContentText := format('<http><body>RestServer<br>Erro no commando conhecido:%s => %s: %s </body></http>',[ARequestInfo.Command, ARequestInfo.URI, e.Message]);
+  AResponseInfo.ResponseNo := 404;
 end;
 
 procedure THttpServerCommand.CommandGet(AContext: TIdContext;
   ARequestInfo: TIdHTTPRequestInfo; AResponseInfo: TIdHTTPResponseInfo);
 begin
   if not TrataCommand(AContext,ARequestInfo,AResponseInfo) then
-
-  AResponseInfo.ContentText := format('<http><body>RestServer<br>Commando não conhecido:%s => %s </body></http>',[ARequestInfo.Command, ARequestInfo.URI]);
+    AResponseInfo.ResponseNo := 404;
 end;
-
 
 constructor THttpServerCommand.Create(AOwner: TComponent);
 begin
@@ -127,12 +131,6 @@ destructor THttpServerCommand.Destroy;
 begin
   FCommands.Free;
   inherited;
-end;
-
-procedure THttpServerCommand.SetCommands(
-  const Value: THttpServerCommandRegister);
-begin
-
 end;
 
 { THttpServerCommandRegister }
@@ -166,45 +164,24 @@ begin
   result:= nil;
 end;
 
-function THttpServerCommandRegister.isUri(AURI, AMask: String; AParams: TStringList): boolean;
+function THttpServerCommandRegister.isUri(const AURI, AMask: String; AParams: TStringList): boolean;
 var
-  sl1: TStringList;
-  sl2: TStringList;
-  I: Integer;
+  x: Integer;
+  M : TMatch;
+
 begin
-  sl1:= TStringList.Create;
-  sl2:= TStringList.Create;
-  try
-    sl1.StrictDelimiter:= true;
-    sl1.Delimiter:= '/';
-    sl1.DelimitedText := AMask;
+  result := TRegEx.IsMatch(AURI, AMask);
 
-    sl2.StrictDelimiter:= true;
-    sl2.Delimiter:= '/';
-    sl2.DelimitedText := AURI;
+  M := TRegEx.Match(AURI, AMask);
 
-    for I := 0 to sl1.Count-1 do
-    begin
-      if sl1[i].StartsWith(':') then
-      begin
-        AParams.Values[sl1[i].Substring(1,255)]:= sl2[i];
-      end else
-      begin
-         if not SameText(sl1[i],sl2[i]) then exit(false);
-      end;
-    end;
-    result:= true;
-  finally
-    sl1.Free;
-    sl2.Free;
+  for x := 0 to M.Groups.Count-1 do
+  begin
+    AParams.Add(M.Groups[x].Value);
   end;
-end;
-//begin
-//  if SameText(AURI, AMask) then  exit(true);
-//  result:= false;
-//end;
 
-procedure THttpServerCommandRegister.Register(ATYPE, APATH: String;
+end;
+
+procedure THttpServerCommandRegister.Register(const ATYPE, APATH: String;
   ACommand: TRESTCommandClass);
 begin
   FList.Add(TRESTCommandREG.Create(ATYPE, APATH, ACommand));
@@ -235,7 +212,27 @@ begin
   FReg:= AReg;
   FParams.Assign(AParams);
   ParseParams(ARequestInfo.URI, AReg.FPATH);
+  ReadStream(FRequestInfo);
+end;
 
+procedure TRESTCommand.ReadStream(ARequestInfo: TIdHTTPRequestInfo);
+var
+  oStream : TStringStream;
+
+begin
+  // Decode stream
+  if ArequestInfo.PostStream <> nil then
+  begin
+    oStream := TStringStream.create;
+    try
+    oStream.CopyFrom(ArequestInfo.PostStream, ArequestInfo.PostStream.Size);
+    oStream.Position := 0;
+
+    FStreamContents := oStream.readString(oStream.Size);
+    finally
+      oStream.free;
+    end;
+  end;
 end;
 
 destructor TRESTCommand.Destroy;
@@ -249,33 +246,17 @@ begin
 
 end;
 
-procedure TRESTCommand.ParseParams(AURI, AMask: String);
+procedure TRESTCommand.ParseParams(const AURI, AMask: String);
 var
-  sl1: TStringList;
-  sl2: TStringList;
-  I: Integer;
+  x: Integer;
+  M : TMatch;
+
 begin
-  sl1:= TStringList.Create;
-  sl2:= TStringList.Create;
-  try
-    sl1.StrictDelimiter:= true;
-    sl1.Delimiter:= '/';
-    sl1.DelimitedText := AMask;
+  M := TRegEx.Match(AURI, AMask);
 
-    sl2.StrictDelimiter:= true;
-    sl2.Delimiter:= '/';
-    sl2.DelimitedText := AURI;
-
-    for I := 0 to sl1.Count-1 do
-    begin
-      if sl1[i].StartsWith(':') then
-      begin
-        FParams.Values[sl1[i].Substring(1,255)]:= sl2[i];
-      end;
-    end;
-  finally
-    sl1.Free;
-    sl2.Free;
+  for x := 0 to M.Groups.Count-1 do
+  begin
+    FParams.Add(M.Groups[x].Value);
   end;
 end;
 
@@ -283,6 +264,11 @@ procedure TRESTCommand.ResponseJSON(Json: String);
 begin
   ResponseInfo.ContentText := Json;
   ResponseInfo.ContentType := 'Application/JSON';
+end;
+
+procedure TRESTCommand.Error(code: integer);
+begin
+  ResponseInfo.ResponseNo := code;
 end;
 
 end.
